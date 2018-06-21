@@ -3,14 +3,15 @@
 #include <cstddef>
 #include <type_traits>
 #include <iterator>
+#include <sstream>
 
 template<typename T,
          typename Comparer = std::less<T>>
 
 class AVLTree
 {
-
 public:
+
     using pointer = T*;
     using value_type = T;
     using const_pointer = const T*;
@@ -18,11 +19,18 @@ public:
     using const_reference = const T&;
     using size_type = size_t;
 
+    template<typename Type, typename EqType>
+    using require = std::enable_if_t<
+                    std::is_convertible<
+                    typename std::iterator_traits<Type>::iterator_category,
+                    EqType>::value>;
+
+
 private:
 
+    static constexpr int ALLOWED_UNBALANCE = 1;
     struct AVLTreeNode;
     using AVLTreeNodePtr = AVLTreeNode*;
-    static constexpr int ALLOWED_UNBALANCE = 1;
 
     struct AVLTreeNode
     {
@@ -36,7 +44,7 @@ private:
                     AVLTreeNodePtr lt = nullptr,
                     AVLTreeNodePtr rt = nullptr,
                     size_type h = 0)
-            : element{elem}, left{lt}, right{rt}, height{h} {}
+            : element{elem}, left{lt}, right{rt}, height{h} {}  // <---
 
         AVLTreeNode(const AVLTreeNode&) = delete;
         AVLTreeNode& operator=(const AVLTreeNode&) = delete;
@@ -118,11 +126,12 @@ private:
     }
 
     const_pointer searchImpl(AVLTreeNodePtr root, const T& elem) const {
+
         if(!root) return nullptr;
         else if(Comparer()(root->element, elem)){
             return searchImpl(root->right, elem);
         }
-        else if(Comparer()(root->element, elem)){
+        else if(Comparer()(elem, root->element)){
             return searchImpl(root->left, elem);
         }
         else return &root->element;
@@ -150,23 +159,28 @@ private:
 
         const T& key = root->element;
 
-        if(Comparer()(elem, key)){
-            removeImpl(root->right, elem);
-        }
-        else if(Comparer()(elem,key)){
+        if(Comparer()(elem,key)){
             removeImpl(root->left, elem);
+        }
+        else if(Comparer()(key, elem)){
+            removeImpl(root->right, elem);
         }
         else
         {
             // there are no any children
-            if(!root->left && !root->right)
+            if(!root->left && !root->right){
                 delete root;
+                root = nullptr;
+            }
 
             // if both child are exist
             else if(root->left && root->right)
             {
                 AVLTreeNodePtr temp = __minimum(root->right);
-                root->element = temp->element;
+
+                value_type eltemp = temp->element;
+                root->element = std::move(eltemp);
+
                 removeImpl(root->right, temp->element);
             }
             // only one child exist
@@ -199,14 +213,23 @@ private:
         }
     }
 
-
-    AVLTreeNodePtr copyring(AVLTreeNodePtr other) noexcept(std::is_nothrow_constructible<T>())
+    ////////////////////////////
+    AVLTreeNodePtr copyring(AVLTreeNodePtr other)
     {
+        AVLTreeNodePtr new_root{};
         if(other)
         {
-            AVLTreeNodePtr new_root = new AVLTreeNode(other->element);
-            new_root->left = copyring(other->left);
-            new_root->right = copyring(other->right);
+            try
+            {
+                new_root = new AVLTreeNode(other->element);
+                new_root->left = copyring(other->left);
+                new_root->right = copyring(other->right);
+            } catch(...)
+            {
+                clearImpl(new_root);
+                throw;
+            }
+
             return new_root;
         }
         return nullptr;
@@ -217,9 +240,16 @@ private:
     {
         if(!root) return;
         adding(c, root->left);
-        c.push_back(root->element);
-        adding(c, root->right);
+        try
+        {
+            c.push_back(root->element);
+        }catch(...)
+        {
+            c.clear();
+            throw;
+        }
 
+        adding(c, root->right);
     }
 
     AVLTreeNodePtr head;
@@ -232,11 +262,13 @@ public:
        _size{0}
     {}
 
-    AVLTree(const AVLTree& tree) noexcept(std::is_nothrow_copy_constructible<T>())
-        : _size(tree._size)
+    AVLTree(const AVLTree& tree)
+        : head{nullptr}, _size{0}
     {
-        copyring(tree);
+        head = copyring(tree.head);
+       _size = tree.size();
     }
+
     AVLTree(AVLTree&& tree) noexcept
         : head(tree.head), _size(tree._size)
     {
@@ -245,51 +277,42 @@ public:
     }
 
     AVLTree(std::initializer_list<T> list)
+        : AVLTree()
     {
+        AVLTree<T> temp;
         for(auto&& it : list)
-            insert(it);
+            temp.insert(it);
+
+        swap(temp);
     }
 
     template<typename InputIterator,
-             typename = std::enable_if_t<
-                 std::is_convertible<
-                 typename std::iterator_traits<InputIterator>::iterator_category,
-                 std::input_iterator_tag>::value>>
+             typename = require<InputIterator, std::input_iterator_tag>>
     AVLTree(InputIterator first, InputIterator last)
     {
+        AVLTree<T> temp;
         for(auto it = first; it != last; ++it)
-            insert(*it);
+            temp.insert(*it);
+
+        swap(temp);
     }
 
-    AVLTree& operator=(const AVLTree& tree)
+    AVLTree& operator=(AVLTree tree) noexcept
     {
-        if(this != &tree)
-        {
-            clear();
-            copyring(tree);
-            _size = tree.size;
-        }
+        swap(tree);
         return *this;
     }
 
-    AVLTree& operator=(AVLTree&& tree)
+    AVLTree& operator=(AVLTree&& tree) noexcept
     {
-        if(this != &tree)
-        {
-            clear();
-            head = std::move(tree.head);
-            tree.head = nullptr;
-            _size = tree._size;
-            tree._size = 0;
-        }
+        swap(tree);
         return *this;
     }
 
     AVLTree& operator=(std::initializer_list<T> list)
     {
-        clear();
-        for(auto&& it : list)
-            insert(it);
+        AVLTree<T> temp(list);
+        swap(temp);
         return *this;
     }
 
@@ -299,6 +322,7 @@ public:
         insertImpl(head, elem);
         _size++;
     }
+
     void insert(T&& elem)
     {
         insertImpl(head, std::move(elem));
@@ -309,19 +333,22 @@ public:
     void emplace(Args&&... args)
     {
         insertImpl(head, std::forward<Args...>(args...));
+        _size++;
     }
 
     bool isEmpty() const noexcept
     {
         return head == nullptr;
     }
+
     const_pointer find(const T& elem) const
     {
         return searchImpl(head, elem);
     }
+
     void remove(const T& elem)
     {
-        removeImpl(head, elem);
+        removeImpl(head, elem);        
     }
 
     void clear() noexcept
@@ -336,7 +363,15 @@ public:
              typename traits = std::char_traits<C>>
     void print(std::basic_ostream<C, traits>& os)
     {
-        printImpl(head, os);
+        std::ostringstream strm;
+        printImpl(head, strm);
+        os << strm.str();
+    }
+
+    void swap(AVLTree<T, Comparer>& other) noexcept
+    {
+        std::swap(this->head, other.head);
+        std::swap(this->_size, other._size);
     }
 
     template<typename SequenceContainer>
@@ -353,6 +388,15 @@ public:
     }
 
 };
+
+namespace std
+{
+    template<typename T, typename Comparer = std::less<T>>
+    void swap(AVLTree<T, Comparer>& t1, AVLTree<T, Comparer>& t2) noexcept
+    {
+        t1.swap(t2);
+    }
+}
 
 
 #endif // AVLTREE_HPP
